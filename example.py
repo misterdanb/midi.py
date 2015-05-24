@@ -1,7 +1,8 @@
 from midi import *
+import sys
 
 if __name__ == '__main__':
-    midi_file = MidiFile('/path/to/midi_file.mid')
+    midi_file = MidiFile(sys.argv[1])
 
     print(midi_file)
 
@@ -12,3 +13,5 @@ if __name__ == '__main__':
             for mtrk_event in chunk:
                 print(mtrk_event)
                 print(mtrk_event.event)
+
+    midi_file.export()

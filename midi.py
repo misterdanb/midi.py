@@ -8,14 +8,26 @@ from enum import Enum
 def bytes_to_uint16(byte_list):
     return struct.unpack('>H', byte_list[:4])[0]
 
+def uint16_to_bytes(value):
+    return struct.pack('>H', value)
+
 def bytes_to_uint24(byte_list):
     return struct.unpack('>I', b'\x00' + byte_list[:3])[0]
+
+def uint24_to_bytes(value):
+    return struct.pack('>I', value)[1:4]
 
 def bytes_to_uint32(byte_list):
     return struct.unpack('>I', byte_list[:4])[0]
 
+def uint32_to_bytes(value):
+    return struct.pack('>I', value)
+
 def bytes_to_str(byte_list):
     return byte_list.decode('utf-8')
+
+def str_to_bytes(value):
+    return value.encode('utf-8')
 
 def enum_values(enum):
     return list(map(lambda x: x.value, enum))
@@ -30,9 +42,8 @@ def decode_variable_length_value(byte_list):
 
     while byte_list[tmp_pos] & 0b10000000 != 0:
         value_part = byte_list[tmp_pos] & 0b01111111
-
         value |= value_part
-        value <<= 7;
+        value <<= 7
 
         tmp_pos += 1
 
@@ -42,6 +53,18 @@ def decode_variable_length_value(byte_list):
     tmp_pos += 1
 
     return(value, tmp_pos)
+
+def encode_variable_length_value(value):
+    bytes_repr = bytearray()
+
+    bytes_repr.insert(0, value & 0b01111111)
+    value >>= 7
+
+    while value & 0b01111111 != 0:
+        bytes_repr.insert(0, (value & 0b01111111) | 0b10000000)
+        value >>= 7
+
+    return(bytes(bytes_repr))
 
 class MidiException(Exception):
     pass
@@ -58,64 +81,59 @@ class MidiFile():
                 file_pos = 0
 
                 while file_pos < len(midi_data):
-                    new_chunk = Chunk(midi_data, file_pos)
+                    new_chunk = Chunk(midi_data[file_pos:])
                     self.chunks.append(new_chunk)
 
                     file_pos += 8 + new_chunk.length
-
-                    print(new_chunk)
-
-                    if new_chunk.chunk_type == ChunkType.m_thd:
-                        for test in new_chunk:
-                            pass
-
-                    if new_chunk.chunk_type == ChunkType.m_trk:
-                        for mtrk_event in new_chunk:
-                            print(mtrk_event)
-                            print(mtrk_event.event)
         except:
             raise(MidiException('Could not open midi file'))
 
     def __iter__(self):
         for chunk in self.chunks:
-            yield chunk
+            yield(chunk)
 
     def __repr__(self):
         return('<File: ' + self.path + '>')
+
+    def export(self, path='out.mid'):
+        with open(path, 'wb') as midi_file:
+            for chunk in self.chunks:
+                midi_file.write(chunk.to_bytes())
+
 
 class ChunkType(Enum):
     m_thd = 'MThd'
     m_trk = 'MTrk'
 
 class Chunk():
-    def __init__(self, byte_list, pos):
-        self.chunk_type = ChunkType(bytes_to_str(byte_list[pos:pos + 4]))
-        self.length = bytes_to_uint32(byte_list[pos + 4: pos + 8])
+    def __init__(self, byte_list):
+        self.chunk_type = ChunkType(bytes_to_str(byte_list[:4]))
+        self.length = bytes_to_uint32(byte_list[4:8])
 
         if self.chunk_type == ChunkType.m_thd:
             if self.length == 6:
-                self.file_format = bytes_to_uint16(byte_list[pos + 8: pos + 10])
-                self.tracks_count = bytes_to_uint16(byte_list[pos + 10: pos + 12])
-                self.division = bytes_to_uint16(byte_list[pos + 12: pos + 14])
+                self.file_format = bytes_to_uint16(byte_list[8:10])
+                self.tracks_count = bytes_to_uint16(byte_list[10:12])
+                self.division = bytes_to_uint16(byte_list[12:14])
             else:
                 raise(MidiException('Invalid MThd chunk'))
         elif self.chunk_type == ChunkType.m_trk:
             self.mtrk_events = []
 
-            tmp_pos = pos + 8
+            tmp_pos = 8
 
-            while tmp_pos < pos + self.length:
-                new_mtrk_event = MTrkEvent(byte_list, tmp_pos)
+            while tmp_pos < 8 + self.length:
+                new_mtrk_event = MTrkEvent(byte_list[tmp_pos:])
 
                 self.mtrk_events.append(new_mtrk_event)
                 tmp_pos += new_mtrk_event.length
 
     def __iter__(self):
         if self.chunk_type == ChunkType.m_thd:
-            yield None
+            yield(None)
         else:
             for mtrk_event in self.mtrk_events:
-                yield mtrk_event
+                yield(mtrk_event)
 
     def __repr__(self):
         if self.chunk_type == ChunkType.m_thd:
@@ -128,20 +146,36 @@ class Chunk():
             return('<Chunk Type: ' + self.chunk_type.name + '. ' +
                    'Length: ' + str(self.length) + '>')
 
-class MTrkEvent():
-    def __init__(self, byte_list, pos):
-        self.delta_time, self.length = decode_variable_length_value(byte_list[pos:])
+    def to_bytes(self):
+        bytes_repr = bytearray()
 
-        tmp_pos = pos + self.length
+        bytes_repr += str_to_bytes(self.chunk_type.value);
+        bytes_repr += uint32_to_bytes(self.length);
+
+        if self.chunk_type == ChunkType.m_thd:
+            bytes_repr += uint16_to_bytes(self.file_format)
+            bytes_repr += uint16_to_bytes(self.tracks_count)
+            bytes_repr += uint16_to_bytes(self.division)
+        elif self.chunk_type == ChunkType.m_trk:
+            for mtrk_event in self.mtrk_events:
+                bytes_repr += mtrk_event.to_bytes()
+
+        return(bytes(bytes_repr))
+
+class MTrkEvent():
+    def __init__(self, byte_list):
+        self.delta_time, self.length = decode_variable_length_value(byte_list)
+
+        tmp_pos = self.length
 
         event_code = byte_list[tmp_pos]
 
         if (event_code & 0b11110000) in enum_values(MidiEventType):
-            self.event = MidiEvent(byte_list, tmp_pos)
+            self.event = MidiEvent(byte_list[tmp_pos:])
         elif event_code in enum_values(SystemEventType):
-            self.event = SystemEvent(byte_list, tmp_pos)
+            self.event = SystemEvent(byte_list[tmp_pos:])
         elif event_code == 0b11111111:
-            self.event = MetaEvent(byte_list, tmp_pos)
+            self.event = MetaEvent(byte_list[tmp_pos:])
         else:
             raise(MidiException('No such event'))
 
@@ -150,6 +184,14 @@ class MTrkEvent():
     def __repr__(self):
         return('<Delta time: ' + str(self.delta_time) + ', ' +
                'Event: ' + self.event.__class__.__name__ + '>')
+
+    def to_bytes(self):
+        bytes_repr = bytearray()
+
+        bytes_repr += encode_variable_length_value(self.delta_time)
+        bytes_repr += self.event.to_bytes()
+
+        return(bytes(bytes_repr))
 
 class MidiEventType(Enum):
     note_off = 0b10000000
@@ -161,51 +203,55 @@ class MidiEventType(Enum):
     pitch_change = 0b11100000
 
 class MidiEvent():
-    def __init__(self, byte_list, pos):
+    def __init__(self, byte_list):
         try:
-            self.event_type = MidiEventType(byte_list[pos] & 0b11110000)
-            self.channel_number = byte_list[pos] & 0b00001111
+            self.event_type = MidiEventType(byte_list[0] & 0b11110000)
+            self.channel_number = byte_list[0] & 0b00001111
 
             if self.event_type == MidiEventType.note_off or \
-               self.event_type == MidiEventType.note_on or \
-               self.event_type == MidiEventType.note_pressure:
-                self.note = byte_list[pos + 1]
-                self.velocity = byte_list[pos + 2]
+               self.event_type == MidiEventType.note_on:
+                self.note = byte_list[1]
+                self.velocity = byte_list[2]
 
                 self.length = 3
-                self.data = byte_list[pos:pos + 3]
+            elif self.event_type == MidiEventType.note_pressure:
+                self.note = byte_list[1]
+                self.pressure = byte_list[2]
+
+                self.length = 3
             elif self.event_type == MidiEventType.control_change:
-                self.control_number = byte_list[pos + 1]
-                self.new_value = byte_list[pos + 2]
+                self.control_number = byte_list[1]
+                self.new_value = byte_list[2]
 
                 self.length = 3
-                self.data = byte_list[pos:pos + 3]
             elif self.event_type == MidiEventType.program_change:
-                self.program_number = byte_list[pos + 1]
+                self.program_number = byte_list[1]
 
                 self.length = 2
             elif self.event_type == MidiEventType.channel_pressure:
-                self.channel_number_number = byte_list[pos]
+                self.channel_pressure = byte_list[1]
 
                 self.length = 2
-                self.data = yte_list[pos:pos + 2]
             elif self.event_type == MidiEventType.pitch_change:
-                self.bottom = byte_list[pos + 1]
-                self.next_value = byte_list[pos + 2]
+                self.bottom = byte_list[1]
+                self.next_value = byte_list[2]
 
                 self.length = 3
-                self.data = self.data = byte_list[pos:pos + 3]
         except ValueError:
             raise(MidiException('No such midi event type'))
 
     def __repr__(self):
         if self.event_type == MidiEventType.note_off or \
-           self.event_type == MidiEventType.note_on or \
-           self.event_type == MidiEventType.note_pressure:
+           self.event_type == MidiEventType.note_on:
             return('<Midi event type: ' + self.event_type.name + ', ' +
                    'Channel number: ' + str(self.channel_number) + ', ' +
                    'Note number: ' + str(self.note) + ', ' +
                    'Velocity: ' + str(self.velocity) + '>')
+        elif self.event_type == MidiEventType.note_pressure:
+            return('<Midi event type: ' + self.event_type.name + ', ' +
+                   'Channel number: ' + str(self.channel_number) + ', ' +
+                   'Note number: ' + str(self.note) + ', ' +
+                   'Pressure: ' + str(self.pressure) + '>')
         elif self.event_type == MidiEventType.control_change:
             return('<Midi event type: ' + self.event_type.name + '. ' +
                    'Channel number: ' + str(self.channel_number) + ', ' +
@@ -218,12 +264,37 @@ class MidiEvent():
         elif self.event_type == MidiEventType.channel_pressure:
             return('<Midi event type: ' + self.event_type.name + ', ' +
                    'Channel number: ' + str(self.channel_number) + ', ' +
-                   'Pressure: ' + str(self.channel_number_number) + '>')
+                   'Pressure: ' + str(self.channel_pressure) + '>')
         elif self.event_type == MidiEventType.pitch_change:
             return('<Midi event type: ' + self.event_type.name + ', ' +
                    'Channel: ' + str(self.channel_number) + ', ' +
                    'Bottom: ' + str(self.bottom) + ', ' +
                    'Next Value: ' + str(self.next_value) + '>')
+
+    def to_bytes(self):
+        bytes_repr = bytearray()
+
+        bytes_repr.append(self.event_type.value | self.channel_number)
+
+        if self.event_type == MidiEventType.note_off or \
+           self.event_type == MidiEventType.note_on:
+            bytes_repr.append(self.note)
+            bytes_repr.append(self.velocity)
+        elif self.event_type == MidiEventType.note_pressure:
+            bytes_repr.append(self.note)
+            bytes_repr.append(self.pressure)
+        elif self.event_type == MidiEventType.control_change:
+            bytes_repr.append(self.control_number)
+            bytes_repr.append(self.new_value)
+        elif self.event_type == MidiEventType.program_change:
+            bytes_repr.append(self.program_number)
+        elif self.event_type == MidiEventType.channel_pressure:
+            bytes_repr.append(self.channel_pressure)
+        elif self.event_type == MidiEventType.pitch_change:
+            bytes_repr.append(self.bottom)
+            bytes_repr.append(self.next_value)
+
+        return(bytes(bytes_repr))
 
 class SystemEventType(Enum):
     exclusive = 0b11110000
@@ -238,21 +309,21 @@ class SystemEventType(Enum):
     real_time_active_sensing = 0b11111110
 
 class SystemEvent():
-    def __init__(self, byte_list, pos):
+    def __init__(self, byte_list):
         try:
-            self.event_type = SystemEventType(byte_list[pos])
+            self.event_type = SystemEventType(byte_list[0])
 
             if self.event_type == SystemEventType.exclusive or \
                self.event_type == SystemEventType.common:
                 self.length = 2
 
-                tmp_pos = pos + 1
+                tmp_pos = 1
 
                 while byte_list[tmp_pos] != SystemEventType.common.value:
                     tmp_pos += 1
                     self.length += 1
 
-                self.payload = byte_list[pos + 1:pos + self.length - 2]
+                self.payload = byte_list[1:self.length - 1]
             elif self.event_type == SystemEventType.common_song_position:
                 self.length = 3
             elif self.event_type == SystemEventType.common_song_select:
@@ -283,6 +354,39 @@ class SystemEvent():
         else:
             return('<System event type: ' + self.event_type.name + '>')
 
+    def to_bytes(self):
+        bytes_repr = bytearray()
+
+        bytes_repr.append(self.event_type.value)
+
+        if self.event_type == SystemEventType.exclusive or \
+           self.event_type == SystemEventType.common:
+            bytes_repr += self.payload
+            bytes_repr.append(SystemEventType.common.value)
+        elif self.event_type == SystemEventType.common_song_position:
+            # todo
+            bytes_repr.append(0)
+            bytes_repr.append(0)
+        elif self.event_type == SystemEventType.common_song_select:
+            # todo
+            bytes_repr.append(0)
+        elif self.event_type == SystemEventType.common_tune_request:
+            pass
+        elif self.event_type == SystemEventType.real_time_timing_clock:
+            pass
+        elif self.event_type == SystemEventType.real_time_start:
+            pass
+        elif self.event_type == SystemEventType.real_time_continue:
+            pass
+        elif self.event_type == SystemEventType.real_time_stop:
+            pass
+        elif self.event_type == SystemEventType.real_time_active_sensing:
+            pass
+        elif self.event_type == SystemEventType.real_time_reset:
+            pass
+
+        return(bytes(bytes_repr))
+
 class MetaEventType(Enum):
     sequence_number = 0b00000000
     text = 0b00000001
@@ -291,7 +395,7 @@ class MetaEventType(Enum):
     instrument_name = 0b00000100
     lyric = 0b00000101
     marker = 0b0000110
-    cue_pount = 0b00000111
+    cue_point = 0b00000111
     channel_prefix = 0b00100000
     end_of_track = 0b00101111
     tempo = 0b01010001
@@ -301,13 +405,13 @@ class MetaEventType(Enum):
     sequencer_specific_payload = 0b01111111
 
 class MetaEvent():
-    def __init__(self, byte_list, pos):
-        if byte_list[pos] == 0b11111111:
+    def __init__(self, byte_list):
+        if byte_list[0] == 0b11111111:
             try:
-                self.event_type = MetaEventType(byte_list[pos + 1])
-                self.payload_length, self.length = decode_variable_length_value(byte_list[pos + 2:])
+                self.event_type = MetaEventType(byte_list[1])
+                self.payload_length, self.length = decode_variable_length_value(byte_list[2:])
 
-                tmp_pos = pos + 2 + self.length
+                tmp_pos = 2 + self.length
 
                 payload = byte_list[tmp_pos:tmp_pos + self.payload_length]
 
@@ -325,7 +429,7 @@ class MetaEvent():
                     self.lyric = bytes_to_str(payload)
                 elif self.event_type == MetaEventType.marker:
                     self.marker = bytes_to_str(payload)
-                elif self.event_type == MetaEventType.cue_pount:
+                elif self.event_type == MetaEventType.cue_point:
                     self.cue_point = bytes_to_str(payload)
                 elif self.event_type == MetaEventType.channel_prefix:
                     self.channel_prefix = payload[0]
@@ -370,7 +474,7 @@ class MetaEvent():
         elif self.event_type == MetaEventType.marker:
             return('<Meta event type: ' + self.event_type.name + ', ' + 
                    'Marker: ' + self.marker + '>')
-        elif self.event_type == MetaEventType.cue_pount:
+        elif self.event_type == MetaEventType.cue_point:
             return('<Meta event type: ' + self.event_type.name + ', ' + 
                    'Cue point: ' + self.cue_point + '>')
         elif self.event_type == MetaEventType.channel_prefix:
@@ -393,4 +497,45 @@ class MetaEvent():
         elif self.event_type == MetaEventType.sequencer_specific_payload:
             return('<Meta event type: ' + self.event_type.name + ', ' +
                    'Sequencer specific payload: ' + str(self.sequencer_specific_payload) + '>')
+
+    def to_bytes(self):
+        bytes_repr = bytearray()
+
+        bytes_repr.append(0b11111111)
+        bytes_repr.append(self.event_type.value)
+        bytes_repr += encode_variable_length_value(self.payload_length)
+
+        if self.event_type == MetaEventType.sequence_number:
+            bytes_repr += uint16_to_bytes(self.sequence_number)
+        elif self.event_type == MetaEventType.text:
+            bytes_repr += str_to_bytes(self.text)
+        elif self.event_type == MetaEventType.copyright_notice:
+            bytes_repr += str_to_bytes(self.copyright_noticed)
+        elif self.event_type == MetaEventType.text_sequence_or_track_name:
+            bytes_repr += str_to_bytes(self.text_sequence_or_track_name)
+        elif self.event_type == MetaEventType.instrument_name:
+            bytes_repr += str_to_bytes(self.instrument_name)
+        elif self.event_type == MetaEventType.lyric:
+            bytes_repr += str_to_bytes(self.lyric)
+        elif self.event_type == MetaEventType.marker:
+            bytes_repr += str_to_bytes(self.marker)
+        elif self.event_type == MetaEventType.cue_point:
+            bytes_repr += str_to_bytes(self.cue_point)
+        elif self.event_type == MetaEventType.channel_prefix:
+            # this is not looking too safe
+            bytes_repr.append(self.channel_prefix)
+        elif self.event_type == MetaEventType.end_of_track:
+            pass
+        elif self.event_type == MetaEventType.tempo:
+            bytes_repr += uint24_to_bytes(self.tempo)
+        elif self.event_type == MetaEventType.smpte_offset:
+            bytes_repr += self.smpte_offset
+        elif self.event_type == MetaEventType.time_signature:
+            bytes_repr += self.time_signature
+        elif self.event_type == MetaEventType.key_signature:
+            bytes_repr += self.key_signature
+        elif self.event_type == MetaEventType.sequencer_specific_payload:
+            bytes_repr += self.sequencer_specific_payload
+
+        return(bytes(bytes_repr))
 
